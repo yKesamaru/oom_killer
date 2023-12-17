@@ -1,28 +1,30 @@
 # モデル学習がOOM Killerに殺されブチ切れた方へ
 
-![](assets/eye-catch.png)
+![](https://raw.githubusercontent.com/yKesamaru/oom_killer/main/assets/eye-catch.png)
 
 ## はじめに
-Ubuntu 20.04 LTS使用時には遭遇しなかった`OOM Killer`が、Ubuntu 22.04 LTS使用時に遭遇しました。
+`OOM Killer`とは、Linuxにおいてメモリ不足に陥った際に、**メモリを消費しているプロセスを殺すことで、メモリを確保する仕組み**です。しかしその決定は動的に行われるので、[単純ではありません](https://github.com/lorenzo-stoakes/linux-vm-notes/blob/master/sections/oom.md#out_of_memory)。
 
-モデル学習中に`OOM Killer`によってプロセスが殺されてしまい、モデル学習が中断されてしまいました。
+以下の式は単純化したものです。詳しくは下記「わかりやすい参照」を確認してください。
 
-悪いことに、モデル学習は一度ストップしてしまうと、再開時に大幅なロス値増加が発生します。
+> $メモリ使用率(‰) = \frac{x}{\text{RAM} + \text{swap}} \times 1000$
+> 
+> - `x` : プロセスが使用しているメモリ量
+> - `RAM` : システムの物理メモリ量
+> - `swap` : スワップ領域のサイズ
 
-![](assets/2023-12-17-15-00-13.png)
+
+Ubuntu 20.04 LTS使用時には遭遇しなかった`OOM Killer`が、Ubuntu 22.04 LTSにアップグレードしたとたん遭遇しました。
+
+モデル学習中に`OOM Killer`によってプロセスが殺されてしまい、モデル学習が中断されてしまいました。（2度も！）
+
+悪いことに、モデル学習は一度ストップしてしまうと、チェックポイントからの再開時に大幅なロス値増加が発生します。（わたしの場合、必ずそうなります）
+
+![](https://raw.githubusercontent.com/yKesamaru/oom_killer/main/assets/2023-12-17-15-00-13.png)
 
 これでは非常に困ります。
 
 `OOM Killer`のアルゴリズムはカーネルのバージョンによって進化するようで、今回はその変更されたアルゴリズムに引っかかってしまったのだと思います。
-
-`OOM Killer`とは、Linuxにおいてメモリ不足に陥った際に、メモリを消費しているプロセスを殺すことで、メモリを確保する仕組みです。しかしその決定は動的に行われるので、[単純ではありません](https://github.com/lorenzo-stoakes/linux-vm-notes/blob/master/sections/oom.md#out_of_memory)。以下の式は単純化したものです。詳しくは下記「わかりやすい参照」を確認してください。
-
-$メモリ使用率(‰) = \frac{x}{\text{RAM} + \text{swap}} \times 1000$
-
-- `x` : プロセスが使用しているメモリ量
-- `RAM` : システムの物理メモリ量
-- `swap` : スワップ領域のサイズ
-
 
 ### わかりやすい参照
 - [その51 プロセスを殺戮する恐怖のOOM killer](https://www.youtube.com/watch?app=desktop&v=D13PVCaHnk0)
@@ -55,7 +57,7 @@ $ journalctl --since "09:30"
 
 しかしながら今回のログを見る限り、メモリ使用率が`50%`を超えて（57.97%）から`20s`経過した後`OOM Killer`が動作したようです。
 主メモリは32GBあり、57%の使用が20s続いてもメモリ不足に陥ることはないはずです。
-（その他のプロセスやキャッシュなどがメモリを消費しているとは思いますが、それでもメモリ不足に陥るほどではないはずです。）
+（その他のプロセスやキャッシュなどがメモリを消費しているとは思いますが、それでもメモリ不足に陥るほどではないです。）
 
 
 そこで以降では、モデル学習しているプログラムが`OOM Killer`に殺されないようにする方法を考えます。
@@ -78,25 +80,8 @@ $ journalctl --since "09:30"
 さて、`<pid>`を特定する必要が出てきました。
 
 ## 専用スクリプトの作成
-```bash
-#!/bin/bash
 
-# 仮想環境のパスを設定（適切なパスに置き換えてください）
-VIRTUAL_ENV_PATH="/path/to/your/virtualenv"
-
-# 仮想環境をアクティブにする
-source bin/activate
-
-# モデル学習プログラムをバックグラウンドで実行し、出力をファイルにリダイレクトする
-nohup python my_28.py > my_28_output.log 2>&1 &
-pid=$!
-
-# PIDを表示
-echo "PID: $pid"
-
-# OOMスコアを設定
-echo -1000 | sudo tee /proc/$pid/oom_score_adj
-```
+https://github.com/yKesamaru/oom_killer/blob/96ecd7a370b888ac8e99333c824d353b92ea55ec/my_28.sh#L1-L14
 
 このスクリプトを実行する前に、スクリプトを`sudo`で実行してください。例えば、次のように実行します。
 
@@ -124,15 +109,25 @@ Epoch 138/600:   8%|▊         | 151/1909 [00:46<07:57,  3.68it/s, loss=11.6]
 ```
 
 正常に動作します。
+
 `/proc`ディレクトリ内のファイルも確認します。
 
-![](assets/2023-12-17-16-26-32.png)
+![](https://raw.githubusercontent.com/yKesamaru/oom_killer/main/assets/2023-12-17-16-26-32.png)
 
-![](assets/2023-12-17-16-27-10.png)
+![](https://raw.githubusercontent.com/yKesamaru/oom_killer/main/assets/2023-12-17-16-27-10.png)
 
 `oom_score_adj`が`-1000`に設定されていることが確認できました。
 
 これでモデル学習中に`OOM Killer`に殺されることはなくなりました。
 
+モデル学習がOOM Killerに殺され、親の仇とばかりにブチ切れた方は、ぜひお試しください。
+ただし、ご自身で必ず方針を決めてから実行してください。
+
 以上です。ありがとうございました。
 
+https://www.youtube.com/watch?app=desktop&v=D13PVCaHnk0
+https://kmyk.github.io/blog/blog/2016/12/31/linux-memory-management/
+https://zenn.dev/satoru_takeuchi/articles/bdbdeceea00a2888c580#memory-cgourp%E3%81%AE%E5%A0%B4%E5%90%88
+https://github.com/lorenzo-stoakes/linux-vm-notes/blob/master/sections/oom.md
+https://docs.kernel.org/admin-guide/cgroup-v1/memory.html?highlight=oom
+https://docs.kernel.org/6.2/admin-guide/mm/concepts.html
